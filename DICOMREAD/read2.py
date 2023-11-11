@@ -9,82 +9,32 @@ import pandas
 import gdcm
 import cv2 as cv
 
+# 模型裁剪范围，二值化阈值点
+range_of_model_Z_left = 195   # 模型裁剪范围，数组第一个位置的左端点
+range_of_model_Z_right = 210    # 模型裁剪范围，数组第一个位置的右端点
+range_of_model_X_left = 230   # 二，左
+range_of_model_X_right = 290    # 二，右
+range_of_model_Y_left = 213   # 三，左
+range_of_model_Y_right = 305   # 三，右
+binarization_threshold = 0   # 二值化的阈值，低于此数值的位置赋予数组第一个数的数值
 
-def show_mhd_slices(fp):
-    imageDirPath = fp
+# 模型修剪和不处理的范围
+model_change_range_X_left = 30
+model_change_range_X_right = 40
+model_change_range_Y_left1 = 3
+model_change_range_Y_right1 = 10
+model_change_range_Z_left = 6
+model_change_range_Z_right = 8
+model_skip_range_Y_left = 22
+model_skip_range_Y_right = 36
 
-    seriesReader = sitk.ImageSeriesReader()
-    seriesIds = seriesReader.GetGDCMSeriesIDs(imageDirPath)
-    filenames = seriesReader.GetGDCMSeriesFileNames(imageDirPath, seriesIds[0])
-    seriesReader.SetFileNames(filenames)
-    image = seriesReader.Execute()
-    img_arr = sitk.GetArrayViewFromImage(image)
-    img_arr = np.append(img_arr[280:, :, :], img_arr[:280, :, :], axis=0)
+max_lenth_of_aaj = 12   # 寰枢椎关节最大间隙长度
+right_endpoint_of_left_aaj_domain_Y = 15   # 左寰枢椎关节区域的右侧边界点
+left_endpoint_of_right_aaj_domaih_Y = 35   # 右寰枢椎关节区域的左侧边界点
 
-    slc = img_arr[210:250, 260, 200:320]
-    t, slc = cv.threshold(slc, 430, 2600, cv.THRESH_TOZERO)
-    # 高斯滤波
-    gaussian_blur = cv.GaussianBlur(slc, (1, 1), 0)
-
-    # Roberts算子边缘识别
-    kernelx = np.array([[-1, 0], [0, 1]], dtype=int)
-    kernely = np.array([[0, -1], [1, 0]], dtype=int)
-    x = cv.filter2D(gaussian_blur, cv.CV_16S, kernelx)
-    y = cv.filter2D(gaussian_blur, cv.CV_16S, kernely)
-    absX = cv.convertScaleAbs(x)
-    absY = cv.convertScaleAbs(y)
-    Roberts = cv.addWeighted(absX, 0.5, absY, 0.5, 0)
-
-    plt.subplot(1, 2, 1)
-    plt.imshow(slc, cmap=plt.cm.Greys_r)
-    plt.subplot(1, 2, 2)
-    plt.imshow(Roberts, cmap=plt.cm.Greys_r)
-
-    plt.show()
-
-
-def save_mhd(imageDirPath, SaveRawDicom, RawName):
-    # 路径
-    RawName = RawName + ".mhd"
-
-    # 读取文件夹内图像
-    seriesReader = sitk.ImageSeriesReader()
-    seriesIds = seriesReader.GetGDCMSeriesIDs(imageDirPath)
-    filenames = seriesReader.GetGDCMSeriesFileNames(imageDirPath, seriesIds[0])
-    seriesReader.SetFileNames(filenames)
-    image = seriesReader.Execute()
-
-    # 获取图像参数
-    RefDs = pd.read_file(filenames[0])
-    # 得到x方向和y方向的Spacing并得到z方向的层厚
-    ConstPixelSpacing = (float(RefDs.PixelSpacing[0]), float(RefDs.PixelSpacing[1]), float(RefDs.SliceThickness))
-    # 得到图像的原点
-    Origin = RefDs.ImagePositionPatient
-
-    # 图像预处理
-    img_arr = sitk.GetArrayViewFromImage(image)  # 转换为array格式
-
-    #切片
-    ArrayDicom2 = img_arr
-    ArrayDicom2 = ArrayDicom2[100:237, 100:289, 100:305]  # Neck10_3----195:237, 230:289, 213:305
-
-    #高通阈值化
-    b = len(ArrayDicom2.flat)
-    a = ArrayDicom2.reshape(b)
-    for i in range(0, len(a)):
-        if a[i] < 236:
-            a[i] = a[0]
-    ArrayDicom2 = a.reshape(ArrayDicom2.shape)
-
-    # 将numpy数组通过SimpleITK转化为mhd和raw文件
-    sitk_img = sitk.GetImageFromArray(ArrayDicom2, isVector=False)
-    sitk_img.SetSpacing(ConstPixelSpacing)
-    sitk_img.SetOrigin(Origin)
-    print(sitk_img)
-    sitk.WriteImage(sitk_img, os.path.join(SaveRawDicom, RawName))
-
-    # ArrayDicom = np.append(img_arr[300:, :, :], img_arr[:300, :, :], axis=0)
-    # t, ArrayDicom2 = cv.threshold(ArrayDicom, 230, 3000, cv.THRESH_TOZERO)
+#高斯滤波相关参数
+GaussianBlur_kernel_size = 3   # 卷积核大小（n*n）尺寸越大越平滑
+GaussianBlur_sigma_value = 1   # 核函数标准差，值越大中心像素权重越大
 
 
 def build_model(fp, save_path, model_name):
@@ -111,13 +61,16 @@ def build_model(fp, save_path, model_name):
     img_arr = sitk.GetArrayViewFromImage(image)  # 转换为array格式
 
     ArrayDicom2 = img_arr
-    ArrayDicom2 = ArrayDicom2[195:210, 230:290, 213:305]  # Neck10_3----195:237, 230:289, 213:305 0625mm:210:230, 220:270, 225:280
+    ArrayDicom2 = ArrayDicom2[range_of_model_Z_left:range_of_model_Z_right,
+                  range_of_model_X_left:range_of_model_X_right,
+                  range_of_model_Y_left:range_of_model_Y_right]  # Neck10_3----195:237, 230:289, 213:305 0625mm:210:230, 220:270, 225:280
+
     b = len(ArrayDicom2.flat)
     a = ArrayDicom2.reshape(b)
     for i in range(len(a)):
-        if a[i] < 0:
+        if a[i] < binarization_threshold:
             a[i] = img_arr[0, 0, 0]
-        #if a[i] > 500:
+        # if a[i] > 500:
         #    a[i] = 1000
     ArrayDicom2 = a.reshape(ArrayDicom2.shape)  # 20,50,55
 
@@ -128,48 +81,50 @@ def build_model(fp, save_path, model_name):
     tall = []
     # 通过扫描建立模型
     for i in range(ArrayDicom2.shape[1]):
-        if 30 < i < 40:
+        if model_change_range_X_left < i < model_change_range_X_right:
             for j in range(ArrayDicom2.shape[2]):
-                if 3 < j < 10:
-                    ArrayDicom2[6:8, i, j] = ArrayDicom2[0, 0, 0]
+                if model_change_range_Y_left1 < j < model_change_range_Y_right1:
+                    ArrayDicom2[model_change_range_Z_left:model_change_range_Z_right, i, j] = img_arr[0, 0, 0]
         for j in range(ArrayDicom2.shape[2]):
-            if 22 < j < 36:
+            if model_skip_range_Y_left < j < model_skip_range_Y_right:
                 continue
+
             tmp = find_gap(ArrayDicom2[:, i, j])
+
             if tmp:
                 upbond = tmp[0]
                 lowbond = tmp[1]
 
                 for k in range(0, len(upbond)):
-                    if abs(lowbond[k] - upbond[k]) > 8:
+                    if abs(lowbond[k] - upbond[k]) > max_lenth_of_aaj:
                         continue
                     else:
-                        if j < 15 or j > 35:
-                            model[upbond[0]:lowbond[0], i, j] = 1050
-                            #model[:upbond[0], i, j] = 1050
+                        if j < right_endpoint_of_left_aaj_domain_Y or j > left_endpoint_of_right_aaj_domaih_Y:
+                            model[upbond[0]:lowbond[0], i, j] = 1050   # 将找到的第一个上界和下界作为模型的边界
+                            # model[:upbond[0], i, j] = 1050
                         else:
-                            model[upbond[k]:lowbond[k], i, j] = 1050
-                            #model[:upbond[k], i, j] = 1050
+                            model[upbond[k]:lowbond[k], i, j] = 1050   # 将找到的最后一个上界和下界作为模型的边界
+                            # model[:upbond[k], i, j] = 1050
     # 对模型高斯滤波
     for i in range(model.shape[0]):
-        model[i, :, :] = cv.GaussianBlur(model[i, :, :], (3, 3), 1)
-    talls = np.array([0])
-    bondscoord = [np.array([0, 0, 0]), np.array([0, 0, 0]), np.array([0, 0, 0]), np.array([0, 0, 0])]
+        model[i, :, :] = cv.GaussianBlur(model[i, :, :], (GaussianBlur_kernel_size, GaussianBlur_kernel_size), 1)
 
+    talls = np.array([0])   # 计算高度
+    bondscoord = [np.array([0, 0, 0]), np.array([0, 0, 0]), np.array([0, 0, 0]), np.array([0, 0, 0])]
 
     # model2 = cv.GaussianBlur(model, (3, 3), 2)
     model2 = model
     for i in range(model2.shape[1]):
         for j in range(model2.shape[2]):
             tmp = model2[:, i, j]
-            up = low = 0 > 1
+            up = low = 0 > 1   # false
             ttall = np.array(0)
 
             for k in range(len(tmp)):
                 if tmp[k] > 0 or up:
                     if not up:
                         upbonds[k, i, j] = 1050
-                        up = 1 > 0
+                        up = 1 > 0   # true
                         ttall = k
 
                     elif tmp[k] == 0 and not low:
@@ -177,7 +132,7 @@ def build_model(fp, save_path, model_name):
                         low = 1 > 0
                         ttall = np.append(ttall, abs(k - ttall))
 
-            ttall = np.delete(ttall, 0)
+            ttall = np.delete(ttall, 0)   # 删去初始化值：0
             talls = np.append(talls, ttall)
 
     # 间隙高度
@@ -286,7 +241,7 @@ def build_model(fp, save_path, model_name):
 
         for i in range(0, bonds4[e].shape[0]):
 
-            # 搜索矢状径
+            # 搜索矢径
             for j in range(0, bonds4[e].shape[2]):
                 for k in range(0, bonds4[e].shape[1]):
                     tmp = bonds4[e][i, :, j] > 0
@@ -320,13 +275,15 @@ def build_model(fp, save_path, model_name):
     talls = np.delete(talls, np.where(talls == 0)[0])
     tall_average = np.average(talls * ConstPixelSpacing[2] * np.cos(np.arctan(np.abs(np.average(slopes)))))
 
+    # 利用pandas数据整理，代码未完成
     dfur = pandas.DataFrame({'z': coord3[:, 0],
-                         'x': coord3[:, 1],
-                         'y': coord3[:, 2],
-                         'curvature': coord3[:, 3],
-                         'vorc': coord3[:, 4]})
+                             'x': coord3[:, 1],
+                             'y': coord3[:, 2],
+                             'curvature': coord3[:, 3],
+                             'vorc': coord3[:, 4]})
     dfur.sort_values(by='curvature')
 
+    # 在环境终端输出部分计算结果
     print("平均间隙高度:", tall_average)
     print("矢径:", bondX)
     print("横径:", bondY)
@@ -335,13 +292,19 @@ def build_model(fp, save_path, model_name):
     print("各个解剖面的曲度:", curvatures)
     print('各个面的凹凸性:', VorC)
 
-    writecsvnames = ["G:/CTs/low_right.txt", "G:/CTs/low_left.txt", "G:/CTs/up_right.txt", "G:/CTs/up_left.txt"]
+    # 将边界数据写入文件
+    writecsvnames = [save_path + "/low_right.txt",
+                     save_path + "/low_left.txt",
+                     save_path + "/up_right.txt",
+                     save_path + "/up_left.txt"]
+
     for i in range(len(coorddatas)):
         file = open(writecsvnames[i], "w+")
         file.write(str(coorddatas[i]))
         file.close()
 
-    file = open("G:/CTs/parameters.txt", "w+")
+    # 将模型几何特征参数写入文件
+    file = open(save_path + "/parameters.txt", "w+")
     file.write("平均间隙高度:\t" + str(tall_average) + '\n\n' +
                "矢径:\t" + str(bondX) + '\n\n' +
                "横径:\t" + str(bondY) + '\n\n' +
@@ -398,3 +361,82 @@ def find_gap(a):
 
     else:
         return []
+
+
+
+
+def show_mhd_slices(fp):
+    imageDirPath = fp
+
+    seriesReader = sitk.ImageSeriesReader()
+    seriesIds = seriesReader.GetGDCMSeriesIDs(imageDirPath)
+    filenames = seriesReader.GetGDCMSeriesFileNames(imageDirPath, seriesIds[0])
+    seriesReader.SetFileNames(filenames)
+    image = seriesReader.Execute()
+    img_arr = sitk.GetArrayViewFromImage(image)
+    img_arr = np.append(img_arr[280:, :, :], img_arr[:280, :, :], axis=0)
+
+    slc = img_arr[210:250, 260, 200:320]
+    t, slc = cv.threshold(slc, 430, 2600, cv.THRESH_TOZERO)
+    # 高斯滤波
+    gaussian_blur = cv.GaussianBlur(slc, (1, 1), 0)
+
+    # Roberts算子边缘识别
+    kernelx = np.array([[-1, 0], [0, 1]], dtype=int)
+    kernely = np.array([[0, -1], [1, 0]], dtype=int)
+    x = cv.filter2D(gaussian_blur, cv.CV_16S, kernelx)
+    y = cv.filter2D(gaussian_blur, cv.CV_16S, kernely)
+    absX = cv.convertScaleAbs(x)
+    absY = cv.convertScaleAbs(y)
+    Roberts = cv.addWeighted(absX, 0.5, absY, 0.5, 0)
+
+    plt.subplot(1, 2, 1)
+    plt.imshow(slc, cmap=plt.cm.Greys_r)
+    plt.subplot(1, 2, 2)
+    plt.imshow(Roberts, cmap=plt.cm.Greys_r)
+
+    plt.show()
+
+
+def save_mhd(imageDirPath, SaveRawDicom, RawName):
+    # 路径
+    RawName = RawName + ".mhd"
+
+    # 读取文件夹内图像
+    seriesReader = sitk.ImageSeriesReader()
+    seriesIds = seriesReader.GetGDCMSeriesIDs(imageDirPath)
+    filenames = seriesReader.GetGDCMSeriesFileNames(imageDirPath, seriesIds[0])
+    seriesReader.SetFileNames(filenames)
+    image = seriesReader.Execute()
+
+    # 获取图像参数
+    RefDs = pd.read_file(filenames[0])
+    # 得到x方向和y方向的Spacing并得到z方向的层厚
+    ConstPixelSpacing = (float(RefDs.PixelSpacing[0]), float(RefDs.PixelSpacing[1]), float(RefDs.SliceThickness))
+    # 得到图像的原点
+    Origin = RefDs.ImagePositionPatient
+
+    # 图像预处理
+    img_arr = sitk.GetArrayViewFromImage(image)  # 转换为array格式
+
+    # 切片
+    ArrayDicom2 = img_arr
+    ArrayDicom2 = ArrayDicom2[100:237, 100:289, 100:305]  # Neck10_3----195:237, 230:289, 213:305
+
+    # 高通阈值化
+    b = len(ArrayDicom2.flat)
+    a = ArrayDicom2.reshape(b)
+    for i in range(0, len(a)):
+        if a[i] < 236:
+            a[i] = a[0]
+    ArrayDicom2 = a.reshape(ArrayDicom2.shape)
+
+    # 将numpy数组通过SimpleITK转化为mhd和raw文件
+    sitk_img = sitk.GetImageFromArray(ArrayDicom2, isVector=False)
+    sitk_img.SetSpacing(ConstPixelSpacing)
+    sitk_img.SetOrigin(Origin)
+    print(sitk_img)
+    sitk.WriteImage(sitk_img, os.path.join(SaveRawDicom, RawName))
+
+    # ArrayDicom = np.append(img_arr[300:, :, :], img_arr[:300, :, :], axis=0)
+    # t, ArrayDicom2 = cv.threshold(ArrayDicom, 230, 3000, cv.THRESH_TOZERO)
